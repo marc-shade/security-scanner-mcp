@@ -117,11 +117,12 @@ Schedule recurring security scans (requires agent runtime).
 
 ### Cluster-Wide Scanning
 
-The security scanner automatically detects and scans all nodes in the agentic cluster:
-- macpro51 (192.168.1.87) - This node
-- mac-studio (192.168.1.79) - Orchestrator
-- macbook-air (192.168.1.55) - Coordinator
-- mac-mini (192.168.1.233) - File server
+The security scanner automatically detects and scans all nodes in the agentic cluster.
+Cluster nodes are loaded from configuration:
+- builder - Linux build node
+- orchestrator - Coordination node
+- coordinator - Multi-node coordinator
+- files - File server
 
 ### Autonomous Agent Integration
 
