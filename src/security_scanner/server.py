@@ -19,13 +19,24 @@ NUCLEI_BIN = os.path.expanduser("~/go/bin/nuclei")
 SCAN_RESULTS_DIR = Path(os.path.join(os.environ.get("AGENTIC_SYSTEM_PATH", "/mnt/agentic-system"), "security-scans"))
 SCAN_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Cluster nodes
-CLUSTER_NODES = {
-    "macpro51": "192.168.1.87",  # TODO: Move to config/env var
-    "mac-studio": "192.168.1.79",  # TODO: Move to config/env var
-    "macbook-air": "192.168.1.55",  # TODO: Move to config/env var
-    "mac-mini": "192.168.1.233"  # TODO: Move to config/env var
-}
+# Cluster nodes - loaded from environment or config file
+def _load_cluster_nodes() -> dict:
+    """
+    Load cluster node configuration from environment variable.
+
+    Set CLUSTER_NODES_JSON env var with JSON like:
+    {"node1": "10.0.0.1", "node2": "10.0.0.2"}
+    """
+    import json
+    env_config = os.environ.get("CLUSTER_NODES_JSON")
+    if env_config:
+        try:
+            return json.loads(env_config)
+        except json.JSONDecodeError:
+            pass
+    return {}
+
+CLUSTER_NODES = _load_cluster_nodes()
 
 # Initialize FastMCP server
 mcp = FastMCP("security-scanner")
