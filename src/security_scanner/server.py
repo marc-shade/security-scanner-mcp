@@ -16,7 +16,7 @@ from fastmcp import FastMCP
 
 # Server configuration
 NUCLEI_BIN = os.path.expanduser("~/go/bin/nuclei")
-SCAN_RESULTS_DIR = Path(os.path.join(os.environ.get("AGENTIC_SYSTEM_PATH", "/mnt/agentic-system"), "security-scans"))
+SCAN_RESULTS_DIR = Path(os.path.join(os.environ.get("AGENTIC_SYSTEM_PATH", "${AGENTIC_SYSTEM_PATH:-/opt/agentic}"), "security-scans"))
 SCAN_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Cluster nodes - loaded from environment or config file
@@ -25,7 +25,7 @@ def _load_cluster_nodes() -> dict:
     Load cluster node configuration from environment variable.
 
     Set CLUSTER_NODES_JSON env var with JSON like:
-    {"node1": "10.0.0.1", "node2": "10.0.0.2"}
+    {"node1": "<REDACTED_IP>", "node2": "<REDACTED_IP>"}
     """
     import json
     env_config = os.environ.get("CLUSTER_NODES_JSON")
