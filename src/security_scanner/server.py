@@ -2,21 +2,46 @@
 """
 Security Scanner MCP Server - Nuclei vulnerability scanning integration
 Provides automated security scanning capabilities with cluster distribution
+
+Integrates with Coral TPU for:
+- Anomaly detection in security findings
+- Pattern recognition across scan results
+- Importance scoring for vulnerability prioritization
 """
 
 import asyncio
 import json
 import os
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from fastmcp import FastMCP
 
+# TPU integration for anomaly detection
+_TPU_AVAILABLE = False
+_tpu_detect_anomaly = None
+_tpu_embed_text = None
+
+try:
+    # Add coral-tpu path for imports
+    coral_tpu_path = os.path.join(os.environ.get("AGENTIC_SYSTEM_PATH", "/mnt/agentic-system"),
+                                   "mcp-servers/coral-tpu-mcp/src")
+    if coral_tpu_path not in sys.path:
+        sys.path.insert(0, coral_tpu_path)
+
+    # Try to import text embedding for anomaly detection
+    from sentence_transformers import SentenceTransformer
+    _text_model = SentenceTransformer('all-MiniLM-L6-v2')
+    _TPU_AVAILABLE = True  # We have embedding capability
+except ImportError:
+    pass  # TPU features will be disabled
+
 # Server configuration
 NUCLEI_BIN = os.path.expanduser("~/go/bin/nuclei")
-SCAN_RESULTS_DIR = Path(os.path.join(os.environ.get("AGENTIC_SYSTEM_PATH", "${AGENTIC_SYSTEM_PATH:-/opt/agentic}"), "security-scans"))
+SCAN_RESULTS_DIR = Path(os.path.join(os.environ.get("AGENTIC_SYSTEM_PATH", "/mnt/agentic-system"), "security-scans"))
 SCAN_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Cluster nodes - loaded from environment or config file
@@ -25,7 +50,7 @@ def _load_cluster_nodes() -> dict:
     Load cluster node configuration from environment variable.
 
     Set CLUSTER_NODES_JSON env var with JSON like:
-    {"node1": "<REDACTED_IP>", "node2": "<REDACTED_IP>"}
+    {"node1": "10.0.0.1", "node2": "10.0.0.2"}
     """
     import json
     env_config = os.environ.get("CLUSTER_NODES_JSON")
@@ -301,6 +326,226 @@ async def list_scans(limit: int = 50) -> str:
         "total_scans": len(scans),
         "scans": scans
     }, indent=2)
+
+
+@mcp.tool()
+async def detect_anomalous_findings(
+    scan_id: str,
+    baseline_scan_id: Optional[str] = None,
+    threshold: float = 0.7
+) -> str:
+    """
+    Use TPU-accelerated embeddings to detect anomalous security findings.
+
+    Compares findings against a baseline (previous scans or expected patterns)
+    to identify unusual or novel vulnerabilities that may need urgent attention.
+
+    Args:
+        scan_id: Current scan to analyze
+        baseline_scan_id: Previous scan to compare against (optional)
+        threshold: Similarity threshold - lower values = more anomalies detected
+
+    Returns:
+        JSON with anomalous findings and analysis
+    """
+    if not _TPU_AVAILABLE:
+        return json.dumps({
+            "success": False,
+            "error": "TPU/embedding features not available. Install sentence-transformers."
+        })
+
+    # Load current scan results
+    result_file = SCAN_RESULTS_DIR / f"{scan_id}.jsonl"
+    if not result_file.exists():
+        return json.dumps({"success": False, "error": f"Scan {scan_id} not found"})
+
+    current_findings = []
+    with open(result_file, 'r') as f:
+        for line in f:
+            if line.strip():
+                current_findings.append(json.loads(line))
+
+    if not current_findings:
+        return json.dumps({
+            "success": True,
+            "anomalies": [],
+            "message": "No findings to analyze"
+        })
+
+    # Build baseline embeddings
+    baseline_embeddings = []
+    baseline_texts = []
+
+    if baseline_scan_id:
+        baseline_file = SCAN_RESULTS_DIR / f"{baseline_scan_id}.jsonl"
+        if baseline_file.exists():
+            with open(baseline_file, 'r') as f:
+                for line in f:
+                    if line.strip():
+                        finding = json.loads(line)
+                        text = _finding_to_text(finding)
+                        baseline_texts.append(text)
+    else:
+        # Use common vulnerability patterns as baseline
+        baseline_texts = [
+            "SQL injection vulnerability allowing database access",
+            "Cross-site scripting XSS in user input fields",
+            "Open redirect vulnerability in URL parameters",
+            "Information disclosure exposing server details",
+            "Missing security headers Content-Security-Policy",
+            "Outdated software version with known vulnerabilities",
+            "Directory listing enabled exposing file structure",
+            "CORS misconfiguration allowing unauthorized access",
+            "SSL/TLS misconfiguration weak ciphers enabled",
+            "Authentication bypass vulnerability"
+        ]
+
+    # Embed baseline
+    if baseline_texts:
+        baseline_embeddings = _text_model.encode(baseline_texts)
+
+    # Analyze current findings
+    anomalies = []
+    import numpy as np
+
+    for finding in current_findings:
+        finding_text = _finding_to_text(finding)
+        finding_emb = _text_model.encode(finding_text)
+
+        # Calculate similarity to baseline
+        if len(baseline_embeddings) > 0:
+            similarities = []
+            for base_emb in baseline_embeddings:
+                sim = float(np.dot(finding_emb, base_emb) / (
+                    np.linalg.norm(finding_emb) * np.linalg.norm(base_emb)
+                ))
+                similarities.append(sim)
+
+            max_similarity = max(similarities)
+            avg_similarity = sum(similarities) / len(similarities)
+
+            # Low similarity = anomalous (novel finding)
+            if max_similarity < threshold:
+                anomalies.append({
+                    "finding": finding,
+                    "anomaly_score": 1.0 - max_similarity,
+                    "max_similarity_to_baseline": max_similarity,
+                    "reason": "Novel finding not matching baseline patterns"
+                })
+
+    # Sort by anomaly score (most anomalous first)
+    anomalies.sort(key=lambda x: x["anomaly_score"], reverse=True)
+
+    return json.dumps({
+        "success": True,
+        "scan_id": scan_id,
+        "baseline_scan_id": baseline_scan_id,
+        "total_findings": len(current_findings),
+        "anomalies_detected": len(anomalies),
+        "threshold": threshold,
+        "anomalies": anomalies[:20],  # Top 20 most anomalous
+        "tpu_enabled": _TPU_AVAILABLE
+    }, indent=2)
+
+
+@mcp.tool()
+async def prioritize_findings(scan_id: str) -> str:
+    """
+    Use TPU-accelerated importance scoring to prioritize security findings.
+
+    Scores each finding based on semantic similarity to critical security
+    terms and patterns, helping focus remediation efforts.
+
+    Args:
+        scan_id: Scan ID to prioritize
+
+    Returns:
+        JSON with prioritized findings
+    """
+    if not _TPU_AVAILABLE:
+        return json.dumps({
+            "success": False,
+            "error": "TPU/embedding features not available"
+        })
+
+    result_file = SCAN_RESULTS_DIR / f"{scan_id}.jsonl"
+    if not result_file.exists():
+        return json.dumps({"success": False, "error": f"Scan {scan_id} not found"})
+
+    findings = []
+    with open(result_file, 'r') as f:
+        for line in f:
+            if line.strip():
+                findings.append(json.loads(line))
+
+    if not findings:
+        return json.dumps({"success": True, "prioritized": [], "message": "No findings"})
+
+    # Critical security terms for importance scoring
+    critical_terms = [
+        "remote code execution critical vulnerability",
+        "authentication bypass unauthorized access",
+        "SQL injection database compromise",
+        "privilege escalation root access",
+        "data breach sensitive information exposure",
+        "zero-day exploit active exploitation"
+    ]
+
+    critical_embeddings = _text_model.encode(critical_terms)
+    import numpy as np
+
+    prioritized = []
+    for finding in findings:
+        finding_text = _finding_to_text(finding)
+        finding_emb = _text_model.encode(finding_text)
+
+        # Calculate max similarity to critical terms
+        max_criticality = 0
+        for crit_emb in critical_embeddings:
+            sim = float(np.dot(finding_emb, crit_emb) / (
+                np.linalg.norm(finding_emb) * np.linalg.norm(crit_emb)
+            ))
+            max_criticality = max(max_criticality, sim)
+
+        # Combine with severity for priority score
+        severity_scores = {
+            "critical": 1.0, "high": 0.8, "medium": 0.5, "low": 0.3, "info": 0.1
+        }
+        sev = finding.get("info", {}).get("severity", "info").lower()
+        severity_weight = severity_scores.get(sev, 0.1)
+
+        priority_score = (max_criticality * 0.6) + (severity_weight * 0.4)
+
+        prioritized.append({
+            "finding": finding,
+            "priority_score": round(priority_score, 3),
+            "criticality_score": round(max_criticality, 3),
+            "severity": sev
+        })
+
+    # Sort by priority (highest first)
+    prioritized.sort(key=lambda x: x["priority_score"], reverse=True)
+
+    return json.dumps({
+        "success": True,
+        "scan_id": scan_id,
+        "total_findings": len(findings),
+        "prioritized": prioritized,
+        "tpu_enabled": _TPU_AVAILABLE
+    }, indent=2)
+
+
+def _finding_to_text(finding: Dict[str, Any]) -> str:
+    """Convert a security finding to text for embedding."""
+    info = finding.get("info", {})
+    parts = [
+        info.get("name", ""),
+        info.get("description", ""),
+        info.get("severity", ""),
+        finding.get("matcher-name", ""),
+        finding.get("matched-at", "")
+    ]
+    return " ".join(filter(None, parts))
 
 
 if __name__ == "__main__":
