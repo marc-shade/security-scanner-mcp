@@ -22,26 +22,43 @@ from fastmcp import FastMCP
 
 # TPU integration for anomaly detection
 _TPU_AVAILABLE = False
+_text_model = None
 _tpu_detect_anomaly = None
 _tpu_embed_text = None
 
-try:
-    # Add coral-tpu path for imports
-    coral_tpu_path = os.path.join(os.environ.get("AGENTIC_SYSTEM_PATH", "/mnt/agentic-system"),
-                                   "mcp-servers/coral-tpu-mcp/src")
+
+def _maybe_load_text_model():
+    """
+    Lazily load the text embedding model so server startup stays fast.
+    Falls back to severity-only prioritization if the model is unavailable.
+    """
+    global _text_model, _TPU_AVAILABLE
+
+    if _text_model is not None:
+        return _text_model
+
+    coral_tpu_path = os.path.join(
+        os.environ.get("AGENTIC_SYSTEM_PATH", "${AGENTIC_SYSTEM_PATH:-/opt/agentic}"),
+        "mcp-servers/coral-tpu-mcp/src"
+    )
     if coral_tpu_path not in sys.path:
         sys.path.insert(0, coral_tpu_path)
 
-    # Try to import text embedding for anomaly detection
-    from sentence_transformers import SentenceTransformer
-    _text_model = SentenceTransformer('all-MiniLM-L6-v2')
-    _TPU_AVAILABLE = True  # We have embedding capability
-except ImportError:
-    pass  # TPU features will be disabled
+    try:
+        from sentence_transformers import SentenceTransformer
+
+        # This loads instantly if the model is cached; otherwise we skip embeddings.
+        _text_model = SentenceTransformer('all-MiniLM-L6-v2')
+        _TPU_AVAILABLE = True
+    except Exception:
+        _text_model = None
+        _TPU_AVAILABLE = False
+
+    return _text_model
 
 # Server configuration
 NUCLEI_BIN = os.path.expanduser("~/go/bin/nuclei")
-SCAN_RESULTS_DIR = Path(os.path.join(os.environ.get("AGENTIC_SYSTEM_PATH", "/mnt/agentic-system"), "security-scans"))
+SCAN_RESULTS_DIR = Path(os.path.join(os.environ.get("AGENTIC_SYSTEM_PATH", "${AGENTIC_SYSTEM_PATH:-/opt/agentic}"), "security-scans"))
 SCAN_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Cluster nodes - loaded from environment or config file
@@ -50,7 +67,7 @@ def _load_cluster_nodes() -> dict:
     Load cluster node configuration from environment variable.
 
     Set CLUSTER_NODES_JSON env var with JSON like:
-    {"node1": "10.0.0.1", "node2": "10.0.0.2"}
+    {"node1": "192.0.2.25", "node2": "192.0.2.152"}
     """
     import json
     env_config = os.environ.get("CLUSTER_NODES_JSON")
@@ -348,10 +365,11 @@ async def detect_anomalous_findings(
     Returns:
         JSON with anomalous findings and analysis
     """
-    if not _TPU_AVAILABLE:
+    model = _maybe_load_text_model()
+    if model is None:
         return json.dumps({
             "success": False,
-            "error": "TPU/embedding features not available. Install sentence-transformers."
+            "error": "Embedding model unavailable; install sentence-transformers or download the cache."
         })
 
     # Load current scan results
@@ -402,7 +420,7 @@ async def detect_anomalous_findings(
 
     # Embed baseline
     if baseline_texts:
-        baseline_embeddings = _text_model.encode(baseline_texts)
+        baseline_embeddings = model.encode(baseline_texts)
 
     # Analyze current findings
     anomalies = []
@@ -410,7 +428,7 @@ async def detect_anomalous_findings(
 
     for finding in current_findings:
         finding_text = _finding_to_text(finding)
-        finding_emb = _text_model.encode(finding_text)
+        finding_emb = model.encode(finding_text)
 
         # Calculate similarity to baseline
         if len(baseline_embeddings) > 0:
@@ -462,12 +480,6 @@ async def prioritize_findings(scan_id: str) -> str:
     Returns:
         JSON with prioritized findings
     """
-    if not _TPU_AVAILABLE:
-        return json.dumps({
-            "success": False,
-            "error": "TPU/embedding features not available"
-        })
-
     result_file = SCAN_RESULTS_DIR / f"{scan_id}.jsonl"
     if not result_file.exists():
         return json.dumps({"success": False, "error": f"Scan {scan_id} not found"})
@@ -481,6 +493,38 @@ async def prioritize_findings(scan_id: str) -> str:
     if not findings:
         return json.dumps({"success": True, "prioritized": [], "message": "No findings"})
 
+    model = _maybe_load_text_model()
+
+    severity_scores = {
+        "critical": 1.0, "high": 0.8, "medium": 0.5, "low": 0.3, "info": 0.1
+    }
+
+    if model is None:
+        prioritized = sorted(
+            (
+                {
+                    "finding": finding,
+                    "priority_score": severity_scores.get(
+                        finding.get("info", {}).get("severity", "info").lower(), 0.1
+                    ),
+                    "criticality_score": 0.0,
+                    "severity": finding.get("info", {}).get("severity", "info").lower()
+                }
+                for finding in findings
+            ),
+            key=lambda x: x["priority_score"],
+            reverse=True
+        )
+        return json.dumps({
+            "success": True,
+            "scan_id": scan_id,
+            "total_findings": len(findings),
+            "prioritized": prioritized,
+            "tpu_enabled": False,
+            "model_loaded": False,
+            "message": "Embeddings unavailable; prioritized by severity only"
+        }, indent=2)
+
     # Critical security terms for importance scoring
     critical_terms = [
         "remote code execution critical vulnerability",
@@ -491,13 +535,13 @@ async def prioritize_findings(scan_id: str) -> str:
         "zero-day exploit active exploitation"
     ]
 
-    critical_embeddings = _text_model.encode(critical_terms)
+    critical_embeddings = model.encode(critical_terms)
     import numpy as np
 
     prioritized = []
     for finding in findings:
         finding_text = _finding_to_text(finding)
-        finding_emb = _text_model.encode(finding_text)
+        finding_emb = model.encode(finding_text)
 
         # Calculate max similarity to critical terms
         max_criticality = 0
@@ -508,9 +552,6 @@ async def prioritize_findings(scan_id: str) -> str:
             max_criticality = max(max_criticality, sim)
 
         # Combine with severity for priority score
-        severity_scores = {
-            "critical": 1.0, "high": 0.8, "medium": 0.5, "low": 0.3, "info": 0.1
-        }
         sev = finding.get("info", {}).get("severity", "info").lower()
         severity_weight = severity_scores.get(sev, 0.1)
 

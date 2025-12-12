@@ -15,8 +15,8 @@ Comprehensive security scanning integration using Nuclei vulnerability scanner w
 ## Installation
 
 ```bash
-cd /mnt/agentic-system/mcp-servers/security-scanner-mcp
-source /mnt/agentic-system/.venv/bin/activate
+cd ${AGENTIC_SYSTEM_PATH:-/opt/agentic}/mcp-servers/security-scanner-mcp
+source ${AGENTIC_SYSTEM_PATH:-/opt/agentic}/.venv/bin/activate
 pip install -e .
 ```
 
@@ -28,11 +28,11 @@ Add to `~/.claude.json`:
 {
   "mcpServers": {
     "security-scanner": {
-      "command": "/mnt/agentic-system/.venv/bin/python",
+      "command": "${AGENTIC_SYSTEM_PATH:-/opt/agentic}/.venv/bin/python",
       "args": ["-m", "security_scanner.server"],
       "env": {
-        "NUCLEI_BIN": "/home/marc/go/bin/nuclei",
-        "SCAN_RESULTS_DIR": "/mnt/agentic-system/security-scans"
+        "NUCLEI_BIN": "${HOME}/go/bin/nuclei",
+        "SCAN_RESULTS_DIR": "${AGENTIC_SYSTEM_PATH:-/opt/agentic}/security-scans"
       }
     }
   }
@@ -142,7 +142,7 @@ Scan results are stored in enhanced-memory for:
 
 ## Scan Results
 
-Results are stored in `/mnt/agentic-system/security-scans/`:
+Results are stored in `${AGENTIC_SYSTEM_PATH:-/opt/agentic}/security-scans/`:
 - `scan_YYYYMMDD_HHMMSS_ID.json` - Scan findings
 - `scan_YYYYMMDD_HHMMSS_ID_metadata.json` - Scan metadata
 
@@ -152,7 +152,7 @@ Results are stored in `/mnt/agentic-system/security-scans/`:
 ```bash
 # Via Claude Code
 scan_target({
-  "target": "192.168.1.87",
+  "target": "192.0.2.196",
   "severity": ["high", "critical"],
   "templates": ["network", "exposure"]
 })
